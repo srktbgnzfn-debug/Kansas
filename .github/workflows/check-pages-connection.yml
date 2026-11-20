@@ -1,0 +1,49 @@
+name: Check Pages deployment connection
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/check-pages-connection.yml]
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check network and Pages upload authorisation
+        shell: bash
+        run: |
+          set -euo pipefail
+          api=https://api.cloudflare.com/client/v4
+          status=$(curl --silent --show-error --connect-timeout 10 --max-time 20 \
+            --output /dev/null --write-out '%{http_code}' "$api/user/tokens/verify")
+          echo "Cloudflare API reachable (HTTP $status)"
+          if [[ -z "$CLOUDFLARE_API_TOKEN" || -z "$CLOUDFLARE_ACCOUNT_ID" ]]; then
+            echo "::notice::Set the repository Cloudflare token and account variable to test Pages authorisation."
+            exit 0
+          fi
+          umask 077
+          response=$(mktemp)
+          trap 'rm -f "$response"' EXIT
+          status=$(curl --silent --show-error --connect-timeout 10 --max-time 20 \
+            --output "$response" --write-out '%{http_code}' \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$api/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/kansasapp/upload-token")
+          echo "Pages upload token request: HTTP $status"
+          [[ "$status" == 200 ]]
+          upload_token=$(jq -er '.result.jwt | select(type == "string" and length > 0)' "$response")
+          printf '::add-mask::%s\n' "$upload_token"
+          status=$(curl --silent --show-error --connect-timeout 10 --max-time 20 \
+            --output "$response" --write-out '%{http_code}' \
+            -H "Authorization: Bearer $upload_token" -H 'Content-Type: application/json' \
+            --data '{"hashes":["0123456789abcdef0123456789abcdef"]}' \
+            "$api/pages/assets/check-missing")
+          echo "Pages asset authorisation: HTTP $status"
+          [[ "$status" == 200 ]]
+          jq -e '.success == true' "$response" >/dev/null
